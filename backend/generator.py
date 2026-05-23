@@ -12,8 +12,34 @@ import ssl
 load_dotenv(Path(__file__).resolve().parent / ".env")
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
+def sanitize_api_key(key: Optional[str]) -> Optional[str]:
+    """
+    Sanitizes raw api key to recover from common deployment/Render copy-paste errors
+    (e.g., 'GROQ_API_KEY=gsk_...', quotes, extra spaces, or newlines).
+    """
+    if not key:
+        return None
+    cleaned = key.strip()
+    
+    # Strip any enclosing double or single quotes
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1].strip()
+        
+    # Remove accidental prefix 'GROQ_API_KEY='
+    if cleaned.startswith("GROQ_API_KEY="):
+        cleaned = cleaned[len("GROQ_API_KEY="):].strip()
+        
+    # Re-strip quotes in case of 'GROQ_API_KEY="gsk_..."'
+    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
+        cleaned = cleaned[1:-1].strip()
+        
+    # Strip whitespaces or newlines
+    cleaned = cleaned.strip()
+    
+    return cleaned if cleaned else None
+
 # Re-read GROQ_API_KEY from os.environ just in case config imported before load_dotenv completed
-GROQ_API_KEY = os.getenv("GROQ_API_KEY") or config.GROQ_API_KEY
+GROQ_API_KEY = sanitize_api_key(os.getenv("GROQ_API_KEY") or config.GROQ_API_KEY)
 
 # Try to import groq library and handle ImportError gracefully
 try:
@@ -315,19 +341,29 @@ class GroqPromptGenerator:
     """Manages secure, optimized prompt generation via Groq API client with fallbacks."""
     
     def __init__(self):
-        self.api_key = os.getenv("GROQ_API_KEY") or config.GROQ_API_KEY
+        raw_key = os.getenv("GROQ_API_KEY") or config.GROQ_API_KEY
+        self.api_key = sanitize_api_key(raw_key)
         self.client = None
         self.mock_mode = True
         
-        if GROQ_AVAILABLE and self.api_key:
-            try:
-                # Mask key for secure diagnostic logging on Render
+        # Validation checks
+        is_valid_key = False
+        if self.api_key:
+            if self.api_key.startswith("gsk_"):
+                is_valid_key = True
                 if len(self.api_key) > 10:
                     masked_key = self.api_key[:6] + "..." + self.api_key[-4:]
                 else:
                     masked_key = "***"
-                print(f"[DEBUG] [INITIALIZE] Detected GROQ_API_KEY: {masked_key}")
-                
+                print(f"[DEBUG] [INITIALIZE] Sanitized GROQ_API_KEY successfully detected: {masked_key}")
+            else:
+                masked_segment = self.api_key[:6] if len(self.api_key) > 6 else self.api_key
+                print(f"[DEBUG] [VALIDATION FAILURE] Sanitized key does not start with 'gsk_'. Segment: '{masked_segment}...'")
+        else:
+            print("[DEBUG] [VALIDATION FAILURE] Sanitized key is empty or None.")
+            
+        if GROQ_AVAILABLE and is_valid_key:
+            try:
                 # Configure a highly stable, hardened persistent custom HTTPX Client
                 # Bypasses local SSL certificate issues on Render and macOS, and sets a premium User-Agent to bypass Cloudflare blocks
                 proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
