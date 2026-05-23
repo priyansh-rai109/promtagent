@@ -17,10 +17,13 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY") or config.GROQ_API_KEY
 
 # Try to import groq library and handle ImportError gracefully
 try:
-    from groq import Groq
+    from groq import Groq, APIConnectionError, APITimeoutError
     GROQ_AVAILABLE = True
 except ImportError:
     GROQ_AVAILABLE = False
+    # Stub classes to prevent NameError in offline/mock environment
+    class APIConnectionError(Exception): pass
+    class APITimeoutError(Exception): pass
     print("Warning: 'groq' package not installed. Operating in high-fidelity mock mode.")
 
 # SYSTEM META-PROMPT TEMPLATE FOR MASTER PROMPT GENERATION
@@ -318,18 +321,23 @@ class GroqPromptGenerator:
         
         if GROQ_AVAILABLE and self.api_key:
             try:
-                # Configure a stable, persistent custom HTTPX Client with SSL validation bypassed
-                # Bypassing SSL validation handles unconfigured macOS root certificates and proxy issues seamlessly
+                # Configure a highly stable, hardened persistent custom HTTPX Client for Render and local macOS
+                # verify=False bypasses CA certificate issues, trust_env=False bypasses broken system proxy configurations
                 custom_client = httpx.Client(
                     verify=False,
-                    timeout=httpx.Timeout(20.0, connect=5.0, read=15.0),
-                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                    trust_env=False,
+                    timeout=httpx.Timeout(20.0, connect=10.0, read=15.0, write=5.0),
+                    limits=httpx.Limits(
+                        max_keepalive_connections=10,
+                        max_connections=20,
+                        keepalive_expiry=30.0
+                    )
                 )
                 self.client = Groq(api_key=self.api_key, http_client=custom_client)
                 self.mock_mode = False
-                print("Resilient Groq Client initialized successfully with custom transport bypass.")
+                print("[DEBUG] [INITIALIZE] Hardened custom HTTPX Client initialized successfully. SSL bypassed (verify=False) and environment proxies ignored (trust_env=False).")
             except Exception as e:
-                print(f"Error initializing custom Groq client transport: {e}. Falling back to Mock Mode.")
+                print(f"[DEBUG] [INITIALIZE FAILURE] Error initializing custom Groq client transport: {e}. Falling back to Mock Mode.")
                 self.mock_mode = True
         else:
             if not GROQ_AVAILABLE:
@@ -405,7 +413,7 @@ class GroqPromptGenerator:
             
             for attempt in range(retries):
                 try:
-                    print(f"Attempting prompt generation with model: {model} (Attempt {attempt+1}/{retries})...")
+                    print(f"[DEBUG] [REQUEST START] Model: {model}, Attempt: {attempt+1}/{retries}, Temp: {temperature}, MaxTokens: {max_tokens}")
                     
                     api_call_start = time.time()
                     
@@ -427,32 +435,48 @@ class GroqPromptGenerator:
                         raise Exception("Low quality or too short response generated.")
                         
                     success_msg = f"Forged successfully using {model} in {duration:.2f}s."
+                    print(f"[DEBUG] [REQUEST SUCCESS] Model: {model}, Attempt: {attempt+1}/{retries} succeeded in {duration:.2f}s.")
                     return generation, model, success_msg
                     
+                except APIConnectionError as ace:
+                    cause = ace.__cause__
+                    cause_desc = f"{type(cause).__name__}: {cause}" if cause else "No underlying cause"
+                    last_error = f"Groq APIConnectionError (Cause: {cause_desc})"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except APITimeoutError as ate:
+                    cause = ate.__cause__
+                    cause_desc = f"{type(cause).__name__}: {cause}" if cause else "No underlying cause"
+                    last_error = f"Groq APITimeoutError (Cause: {cause_desc})"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except httpx.ConnectError as ce:
+                    last_error = f"httpx.ConnectError: {ce}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
                 except httpx.ConnectTimeout as cte:
-                    last_error = f"Timeout Error (Connection Timeout): {cte}"
-                    print(f"Timeout occurred using model {model} on attempt {attempt+1}: {last_error}")
+                    last_error = f"httpx.ConnectTimeout: {cte}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
                 except httpx.ReadTimeout as rte:
-                    last_error = f"Timeout Error (Read Timeout): {rte}"
-                    print(f"Timeout occurred using model {model} on attempt {attempt+1}: {last_error}")
+                    last_error = f"httpx.ReadTimeout: {rte}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
                 except ssl.SSLError as se:
-                    last_error = f"SSL/TLS Error: {se}"
-                    print(f"SSL issue occurred using model {model} on attempt {attempt+1}: {last_error}")
+                    last_error = f"ssl.SSLError: {se}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
                 except httpx.TransportError as te:
-                    last_error = f"Transport/Network Error: {te}"
-                    print(f"Network transport issue occurred using model {model} on attempt {attempt+1}: {last_error}")
+                    last_error = f"httpx.TransportError: {te}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
                 except Exception as e:
-                    last_error = f"General API Error: {str(e)}"
-                    print(f"Error using model {model} (Attempt {attempt+1}/{retries}): {last_error}")
+                    last_error = f"General API/Runtime Error: {type(e).__name__}: {str(e)}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
                     
                 # Exponential backoff delay
-                time.sleep(backoff)
-                backoff *= 2.0
+                if attempt < retries - 1:
+                    print(f"[DEBUG] [REQUEST RETRY] Model: {model}, Attempt: {attempt+1}/{retries} failed. Backing off for {backoff:.1f}s before retry...")
+                    time.sleep(backoff)
+                    backoff *= 2.0
             
-            print(f"Model {model} failed all retries. Falling back to the next model in hierarchy...")
+            print(f"[DEBUG] [MODEL FAILURE] Model {model} failed all {retries} retries. Falling back to the next model in hierarchy...")
             
         # Critical Safe Catch - If all Groq API calls fail, fallback to dynamic mock template gracefully
-        print("CRITICAL: All Groq models failed. Engaging mock fallback system to maintain runtime integrity.")
+        print(f"[DEBUG] [FINAL FALLBACK ACTIVATION] All models failed. Triggering simulator offline fallback mode. Last error: {last_error}")
         smart_fallback = self._generate_smart_fallback(clean_idea, category)
         customized_mock = f"### [SYSTEM NOTICE: PRIMARY API CRASHED - FALLBACK ACTIVE]\n*Error details: {last_error}*\n\n{smart_fallback}"
         return customized_mock, "Mock Safe-Fallback", "Emergency API Fallback Activated"
@@ -541,19 +565,63 @@ class GroqPromptGenerator:
         user_prompt = f"### Current Master Prompt:\n{current_prompt}\n\n### User Feedback / Refinement Request:\n{clean_feedback}\n\nPlease output the updated, refined Master Prompt. Do not include chatty preambles."
         
         for model in config.MODEL_LIST:
-            try:
-                response = self.client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    model=model,
-                    temperature=temperature,
-                    max_tokens=max_tokens
-                )
-                return response.choices[0].message.content.strip(), model, "Prompt refined successfully."
-            except Exception as e:
-                print(f"Refinement error with model {model}: {e}")
+            # Exponential Backoff Retries per model for refinement
+            retries = 3
+            backoff = 1.0
+            
+            for attempt in range(retries):
+                try:
+                    print(f"[DEBUG] [REQUEST START] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}, Temp: {temperature}, MaxTokens: {max_tokens}")
+                    
+                    response = self.client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=max_tokens
+                    )
+                    
+                    print(f"[DEBUG] [REQUEST SUCCESS] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries} succeeded.")
+                    return response.choices[0].message.content.strip(), model, "Prompt refined successfully."
+                    
+                except APIConnectionError as ace:
+                    cause = ace.__cause__
+                    cause_desc = f"{type(cause).__name__}: {cause}" if cause else "No underlying cause"
+                    last_error = f"Groq APIConnectionError (Cause: {cause_desc})"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except APITimeoutError as ate:
+                    cause = ate.__cause__
+                    cause_desc = f"{type(cause).__name__}: {cause}" if cause else "No underlying cause"
+                    last_error = f"Groq APITimeoutError (Cause: {cause_desc})"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except httpx.ConnectError as ce:
+                    last_error = f"httpx.ConnectError: {ce}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except httpx.ConnectTimeout as cte:
+                    last_error = f"httpx.ConnectTimeout: {cte}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except httpx.ReadTimeout as rte:
+                    last_error = f"httpx.ReadTimeout: {rte}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except ssl.SSLError as se:
+                    last_error = f"ssl.SSLError: {se}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except httpx.TransportError as te:
+                    last_error = f"httpx.TransportError: {te}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                except Exception as e:
+                    last_error = f"General API/Runtime Error: {type(e).__name__}: {str(e)}"
+                    print(f"[DEBUG] [TRANSPORT FAILURE] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries}. Transport reason: {last_error}")
+                    
+                # Exponential backoff delay for refinement
+                if attempt < retries - 1:
+                    print(f"[DEBUG] [REQUEST RETRY] [REFINE] Model: {model}, Attempt: {attempt+1}/{retries} failed. Backing off for {backoff:.1f}s before retry...")
+                    time.sleep(backoff)
+                    backoff *= 2.0
+            
+            print(f"[DEBUG] [MODEL FAILURE] [REFINE] Model {model} failed all {retries} retries. Falling back to the next model in hierarchy...")
                 
         # Safe catch
         refined_mock = f"{current_prompt}\n\n### 🔧 **[REFINEMENT ADDENDUM - OFFLINE]**\n*   **Feedback**: '{clean_feedback}'\n*   **Notice**: Refinement compiled in offline fallback."
