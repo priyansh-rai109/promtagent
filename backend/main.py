@@ -45,7 +45,7 @@ class GenerateRequest(BaseModel):
     category: str
     temperature: float = 0.7
     max_tokens: int = 1500
-    selected_model: str = "llama3-70b-8192"
+    selected_model: str = "llama-3.3-70b-versatile"
 
 class RefineRequest(BaseModel):
     current_prompt: str

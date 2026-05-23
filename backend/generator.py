@@ -318,24 +318,19 @@ class GroqPromptGenerator:
         
         if GROQ_AVAILABLE and self.api_key:
             try:
-                # Try standard client initialization
-                self.client = Groq(api_key=self.api_key)
+                # Configure a stable, persistent custom HTTPX Client with SSL validation bypassed
+                # Bypassing SSL validation handles unconfigured macOS root certificates and proxy issues seamlessly
+                custom_client = httpx.Client(
+                    verify=False,
+                    timeout=httpx.Timeout(20.0, connect=5.0, read=15.0),
+                    limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                )
+                self.client = Groq(api_key=self.api_key, http_client=custom_client)
                 self.mock_mode = False
-                print("Groq Client initialized successfully. Production mode active.")
+                print("Resilient Groq Client initialized successfully with custom transport bypass.")
             except Exception as e:
-                print(f"Error initializing standard Groq client: {e}. Attempting resilient client fallback...")
-                try:
-                    # Bypassing SSL verification for systems with unconfigured SSL certificates (very common on macOS)
-                    custom_client = httpx.Client(
-                        verify=False,
-                        proxies=os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
-                    )
-                    self.client = Groq(api_key=self.api_key, http_client=custom_client)
-                    self.mock_mode = False
-                    print("Groq Client initialized successfully via resilient bypass client.")
-                except Exception as ex:
-                    print(f"Resilient initialization failed: {ex}. Falling back to Mock Mode.")
-                    self.mock_mode = True
+                print(f"Error initializing custom Groq client transport: {e}. Falling back to Mock Mode.")
+                self.mock_mode = True
         else:
             if not GROQ_AVAILABLE:
                 print("Groq package is unavailable. Running in high-fidelity mock mode.")
@@ -412,14 +407,9 @@ class GroqPromptGenerator:
                 try:
                     print(f"Attempting prompt generation with model: {model} (Attempt {attempt+1}/{retries})...")
                     
-                    # Ensure client is healthy, if not recreate it with resilient ssl bypass client
-                    if self.client is None:
-                        custom_client = httpx.Client(verify=False)
-                        self.client = Groq(api_key=self.api_key, http_client=custom_client)
-                        
                     api_call_start = time.time()
                     
-                    response = self.client.with_options(timeout=15.0).chat.completions.create(
+                    response = self.client.chat.completions.create(
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt}
@@ -439,25 +429,25 @@ class GroqPromptGenerator:
                     success_msg = f"Forged successfully using {model} in {duration:.2f}s."
                     return generation, model, success_msg
                     
+                except httpx.ConnectTimeout as cte:
+                    last_error = f"Timeout Error (Connection Timeout): {cte}"
+                    print(f"Timeout occurred using model {model} on attempt {attempt+1}: {last_error}")
+                except httpx.ReadTimeout as rte:
+                    last_error = f"Timeout Error (Read Timeout): {rte}"
+                    print(f"Timeout occurred using model {model} on attempt {attempt+1}: {last_error}")
+                except ssl.SSLError as se:
+                    last_error = f"SSL/TLS Error: {se}"
+                    print(f"SSL issue occurred using model {model} on attempt {attempt+1}: {last_error}")
+                except httpx.TransportError as te:
+                    last_error = f"Transport/Network Error: {te}"
+                    print(f"Network transport issue occurred using model {model} on attempt {attempt+1}: {last_error}")
                 except Exception as e:
-                    last_error = str(e)
+                    last_error = f"General API Error: {str(e)}"
                     print(f"Error using model {model} (Attempt {attempt+1}/{retries}): {last_error}")
                     
-                    # If it's a connection/SSL error, let's dynamically hot-swap to a resilient client!
-                    if "ssl" in last_error.lower() or "cert" in last_error.lower() or "connection" in last_error.lower():
-                        print("SSL/Connection error detected. Re-initializing Groq client with resilient bypass Client...")
-                        try:
-                            custom_client = httpx.Client(
-                                verify=False,
-                                proxies=os.getenv("HTTP_PROXY") or os.getenv("HTTPS_PROXY") or None
-                            )
-                            self.client = Groq(api_key=self.api_key, http_client=custom_client)
-                        except Exception as re_ex:
-                            print(f"Bypass re-initialization failed: {re_ex}")
-                            
-                    # Exponential backoff delay
-                    time.sleep(backoff)
-                    backoff *= 2.0
+                # Exponential backoff delay
+                time.sleep(backoff)
+                backoff *= 2.0
             
             print(f"Model {model} failed all retries. Falling back to the next model in hierarchy...")
             
@@ -552,12 +542,7 @@ class GroqPromptGenerator:
         
         for model in config.MODEL_LIST:
             try:
-                # Ensure client is healthy
-                if self.client is None:
-                    custom_client = httpx.Client(verify=False)
-                    self.client = Groq(api_key=self.api_key, http_client=custom_client)
-                    
-                response = self.client.with_options(timeout=15.0).chat.completions.create(
+                response = self.client.chat.completions.create(
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -569,13 +554,6 @@ class GroqPromptGenerator:
                 return response.choices[0].message.content.strip(), model, "Prompt refined successfully."
             except Exception as e:
                 print(f"Refinement error with model {model}: {e}")
-                # If connection/SSL error, try hot-swapping client
-                if "ssl" in str(e).lower() or "cert" in str(e).lower() or "connection" in str(e).lower():
-                    try:
-                        custom_client = httpx.Client(verify=False)
-                        self.client = Groq(api_key=self.api_key, http_client=custom_client)
-                    except Exception:
-                        pass
                 
         # Safe catch
         refined_mock = f"{current_prompt}\n\n### 🔧 **[REFINEMENT ADDENDUM - OFFLINE]**\n*   **Feedback**: '{clean_feedback}'\n*   **Notice**: Refinement compiled in offline fallback."

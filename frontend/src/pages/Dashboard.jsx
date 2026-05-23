@@ -38,7 +38,7 @@ export default function Dashboard({
   const [rawIdea, setRawIdea] = useState("");
   const [temp, setTemp] = useState(0.7);
   const [tokens, setTokens] = useState(1500);
-  const [model, setModel] = useState("llama3-70b-8192");
+  const [model, setModel] = useState("llama-3.3-70b-versatile");
   const [refineFeedback, setRefineFeedback] = useState("");
   const [isCopied, setIsCopied] = useState(false);
 

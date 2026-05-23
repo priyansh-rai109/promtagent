@@ -14,7 +14,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
 # 2-TIER MODEL DEPLOYMENT (Ordered from Primary to Secondary)
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
-SECONDARY_MODEL = "deepseek-r1-distill-llama-70b"
+SECONDARY_MODEL = "llama-3.1-8b-instant"
 
 MODEL_LIST = [PRIMARY_MODEL, SECONDARY_MODEL]
 
