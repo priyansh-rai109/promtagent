@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: promptcraft-ai
+    env: python
+    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd ..
+    startCommand: python backend/main.py
+    plan: free
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: PORT
+        value: 8000
