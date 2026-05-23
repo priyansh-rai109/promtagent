@@ -12,12 +12,11 @@ STYLE_CSS_PATH = BASE_DIR / "assets" / "style.css"
 # GROQ API SETTINGS
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
-# 3-TIER MODEL DEPLOYMENT (Ordered from Primary to Tertiary)
+# 2-TIER MODEL DEPLOYMENT (Ordered from Primary to Secondary)
 PRIMARY_MODEL = "llama-3.3-70b-versatile"
 SECONDARY_MODEL = "deepseek-r1-distill-llama-70b"
-TERTIARY_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
-MODEL_LIST = [PRIMARY_MODEL, SECONDARY_MODEL, TERTIARY_MODEL]
+MODEL_LIST = [PRIMARY_MODEL, SECONDARY_MODEL]
 
 # APP CONSTANTS
 APP_TITLE = "PROMPT_FORGE"
